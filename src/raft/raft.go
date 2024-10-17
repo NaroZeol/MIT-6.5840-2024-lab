@@ -424,7 +424,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	log.Printf("[%v] receive InstallSnapshot from [%v]", rf.me, args.LeaderId)
 
@@ -433,14 +432,17 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// check before install
 	if args.Term < rf.currentTerm {
 		log.Printf("[%v] refuse to install snapshot because of higher term", rf.me)
+		rf.mu.Unlock()
 		return
 	}
 	if args.LastIncludedIndex < rf.snapshotIndex {
 		log.Printf("[%v] refuse to install snapshot because of more up-to-date snapshot", rf.me)
+		rf.mu.Unlock()
 		return
 	}
 	if args.LastIncludedIndex == rf.snapshotIndex {
 		log.Printf("[%v] refuce to install snapshot because of same up-to-date snapshot", rf.me)
+		rf.mu.Unlock()
 		return
 	}
 
@@ -464,8 +466,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.snapshot = args.Data
 	rf.snapshotIndex = args.LastIncludedIndex
 	rf.snapshotTerm = args.LastIncludedTerm
-
 	rf.persist()
+
+	rf.mu.Unlock()
 	// reset state machine
 	rf.applyCh <- ApplyMsg{
 		CommandValid:  false,
@@ -474,6 +477,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotIndex: rf.snapshotIndex,
 		SnapshotTerm:  rf.snapshotTerm,
 	}
+
+	rf.mu.Lock()
+	rf.lastApplied = args.LastIncludedIndex
+	rf.commitIndex = args.LastIncludedIndex
+	rf.mu.Unlock()
 
 	log.Printf("[%v] install snapshot up to #%v successfully!", rf.me, args.LastIncludedIndex)
 }
@@ -599,14 +607,12 @@ func (rf *Raft) ticker() {
 			cancelToken := int32(0)
 			rf.lastHeartBeat = time.Now() // reset election timer
 
-			votedForTerm := rf.currentTerm + 1
 			go rf.election(&cancelToken)
 			for {
 				rf.mu.Lock()
 				if time.Since(rf.lastHeartBeat) > TM_ElectionTimeout || atomic.LoadInt32(&cancelToken) == 1 ||
 					rf.state != RS_Candiate || rf.killed() {
 					atomic.StoreInt32(&cancelToken, 1)
-					log.Printf("[%v] lose election in term %v", rf.me, votedForTerm)
 					rf.mu.Unlock()
 					break
 				}
@@ -815,11 +821,12 @@ func (rf *Raft) handleFailedReply(server int, args *AppendEntriesArgs, reply *Ap
 	rf.mu.Lock()
 	// defer rf.cond.Signal()
 	// Case 0: higher term, turn to follower
-	if args.Term < reply.Term {
+	if rf.currentTerm < reply.Term {
 		rf.state = RS_Follower
 		rf.votedFor = nil
 		rf.currentTerm = reply.Term
 		rf.persist()
+		atomic.StoreInt32(cancelToken, 1) // Cancel proactively to avoid a rare competitive situation
 		log.Printf("[%v] get a reply from higher term %v, turn to follower\n", rf.me, reply.Term)
 		rf.mu.Unlock()
 		return
@@ -891,6 +898,7 @@ func (rf *Raft) handleFailedReply(server int, args *AppendEntriesArgs, reply *Ap
 			rf.votedFor = nil
 			rf.currentTerm = snapshotReply.Term
 			rf.persist()
+			atomic.StoreInt32(cancelToken, 1) // Cancel proactively to avoid a rare competitive situation
 			log.Printf("[%v] InstallSnapshot but get a reply from higher term %v, turn to follower\n", rf.me, snapshotReply.Term)
 			rf.mu.Unlock()
 			return
