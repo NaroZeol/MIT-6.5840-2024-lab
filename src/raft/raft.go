@@ -283,7 +283,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = RS_Follower
 		rf.persist()
 
-		log.Printf("[%v] recieve a RequestVote with higher term, change its term to %v\n", rf.me, rf.currentTerm)
+		log.Printf("[%v] receive a RequestVote with higher term, change its term to %v\n", rf.me, rf.currentTerm)
 	}
 
 	isUpToDate := (args.LastLogTerm > lastLogTerm) || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)
@@ -707,7 +707,7 @@ func (rf *Raft) election(cancelToken *int32) {
 			rf.state = RS_Leader
 			rf.persist()
 			// Reinitialized after election
-			for i := range rf.nextIndex {
+			for i := range rf.peers {
 				if i == rf.me {
 					continue
 				}
@@ -766,6 +766,11 @@ func (rf *Raft) syncEntries(cancelToken *int32) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	// return immediately if cancelToken had been set during lock wating time
+	if atomic.LoadInt32(cancelToken) == 1 {
+		return
+	}
+
 	// currentIndex := len(rf.log) - 1
 	for i := range rf.peers {
 		if i == rf.me {
@@ -776,6 +781,8 @@ func (rf *Raft) syncEntries(cancelToken *int32) {
 		realNextIndex := rf.nextIndex[i]
 		if rf.nextIndex[i] < rf.globalIndex(1) {
 			realNextIndex = rf.globalIndex(1)
+		} else if rf.nextIndex[i] > rf.globalLogLen() {
+			realNextIndex = rf.globalLogLen() // leader's last log entry (index start at 1)
 		}
 
 		args := AppendEntriesArgs{
@@ -822,12 +829,8 @@ func (rf *Raft) handleFailedReply(server int, args *AppendEntriesArgs, reply *Ap
 	// defer rf.cond.Signal()
 	// Case 0: higher term, turn to follower
 	if rf.currentTerm < reply.Term {
-		rf.state = RS_Follower
-		rf.votedFor = nil
-		rf.currentTerm = reply.Term
-		rf.persist()
 		atomic.StoreInt32(cancelToken, 1) // Cancel proactively to avoid a rare competitive situation
-		log.Printf("[%v] get a reply from higher term %v, turn to follower\n", rf.me, reply.Term)
+		log.Printf("[%v] get a reply from higher term %v, cancel leader tasks\n", rf.me, reply.Term)
 		rf.mu.Unlock()
 		return
 	}
@@ -894,12 +897,8 @@ func (rf *Raft) handleFailedReply(server int, args *AppendEntriesArgs, reply *Ap
 
 		rf.mu.Lock()
 		if rf.currentTerm < snapshotReply.Term {
-			rf.state = RS_Follower
-			rf.votedFor = nil
-			rf.currentTerm = snapshotReply.Term
-			rf.persist()
 			atomic.StoreInt32(cancelToken, 1) // Cancel proactively to avoid a rare competitive situation
-			log.Printf("[%v] InstallSnapshot but get a reply from higher term %v, turn to follower\n", rf.me, snapshotReply.Term)
+			log.Printf("[%v] InstallSnapshot but get a reply from higher term %v, cancel leader tasks\n", rf.me, snapshotReply.Term)
 			rf.mu.Unlock()
 			return
 		}
@@ -972,9 +971,9 @@ func (rf *Raft) serveAsLeader(term int) {
 		rf.mu.Lock()
 		rf.cond.Wait()
 
-		if rf.killed() || rf.state != RS_Leader || rf.currentTerm != term {
+		if atomic.LoadInt32(&cancelToken) == 1 || rf.killed() || rf.state != RS_Leader || rf.currentTerm != term {
 			atomic.StoreInt32(&cancelToken, 1)
-			log.Printf("[%v] lose it's right or dead, cancel all leader tasks", rf.me)
+			log.Printf("[%v] lose it's power in term %v or dead, cancel all leader tasks", rf.me, term)
 			rf.mu.Unlock()
 			return
 		}
