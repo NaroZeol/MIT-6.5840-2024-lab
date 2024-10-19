@@ -850,21 +850,21 @@ func (rf *Raft) handleFailedReply(server int, args *AppendEntriesArgs, reply *Ap
 		return
 	}
 
-	// Case 3: reply lower prevLogIndex, but leader doesn't have same prevLogTerm at prevLogIndex
-	// e.g. :
-	// S0: 2 2 2
-	// S1: 2 2 3 3
-	// S2: 2 2 3
-	// when S1 send #4 to S0
-	// Case 4: replying with a higher PrevLogIndex than len(rf.log)
+	// Case 3: replying with a higher PrevLogIndex than len(rf.log)
 	// e.g. :
 	// S0: 2 2 2 2
 	// S1: 2 3 3
 	// S2: 2 3
 	// when S1 send #3 to S0
+	// Case 4: reply lower prevLogIndex, but leader doesn't have same prevLogTerm at prevLogIndex
+	// e.g. :
+	// S0: 2 2 2
+	// S1: 2 2 3 3
+	// S2: 2 2 3
+	// when S1 send #4 to S0
 	if rf.localIndex(reply.LastApplied+1) > 0 &&
-		(reply.PrevLogIndex < args.PrevLogIndex && reply.PrevLogTerm != rf.log[rf.localIndex(reply.PrevLogIndex)].Term ||
-			reply.PrevLogIndex >= args.PrevLogIndex) {
+		(reply.PrevLogIndex >= args.PrevLogIndex || // check first to avoid rf.log[rf.localIndex(reply.PrevLogIndex)] out of range
+			(reply.PrevLogIndex < args.PrevLogIndex && reply.PrevLogTerm != rf.log[rf.localIndex(reply.PrevLogIndex)].Term)) {
 		rf.nextIndex[server] = reply.LastApplied + 1
 		log.Printf("[%v] {case3,4}: set nextIndex[%v] to reply.LastApplied+1: #%v", rf.me, server, reply.LastApplied+1)
 		rf.mu.Unlock()
