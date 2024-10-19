@@ -216,6 +216,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.snapshotIndex = index // index is a global index
 	rf.snapshotTerm = rf.log[rf.localIndex(index)].Term
 	rf.persist()
+
+	rf.lastApplied = index
+	rf.commitIndex = index
 	log.Printf("[%v] create snapshot from #%v to #%v successfully", rf.me, beforeSnapshotIndex+1, index)
 }
 
