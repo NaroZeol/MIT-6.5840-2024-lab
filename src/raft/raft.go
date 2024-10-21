@@ -322,21 +322,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term >= rf.currentTerm {
 		formerState := rf.state
 
+		if args.Term > rf.currentTerm {
+			rf.votedFor = nil // reset rf.votedFor if rf.currentTerm will change to a higher one
+		}
 		rf.currentTerm = args.Term
 		rf.state = RS_Follower
 		rf.persist()
 		rf.lastHeartBeat = time.Now()
 		if formerState != RS_Follower {
-			log.Printf("[%v] turn to follower\n", rf.me)
+			log.Printf("[%v] turn to follower in term %v\n", rf.me, rf.currentTerm)
 		}
 
 		reply.Success = true
-
-		// Update Term
-		if args.Term > rf.currentTerm {
-			reply.Term = rf.currentTerm
-			log.Printf("[%v] find a new leader [%v] in term %v", rf.me, args.LeaderId, args.Term)
-		}
+		reply.Term = rf.currentTerm
 	} else if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
@@ -624,16 +622,14 @@ func (rf *Raft) ticker() {
 				if time.Since(rf.lastHeartBeat) > TM_ElectionTimeout || atomic.LoadInt32(&cancelToken) == 1 ||
 					rf.state != RS_Candiate || rf.killed() {
 					atomic.StoreInt32(&cancelToken, 1)
-					rf.mu.Unlock()
 					break
 				}
 				rf.mu.Unlock()
 				time.Sleep(30 * time.Millisecond)
 			}
-		} else {
-			rf.mu.Unlock()
 		}
 
+		rf.mu.Unlock()
 		// pause for a random amount of time
 		// milliseconds.
 		ms := (rand.Int63() % int64(TM_RandomWaitingTime))
@@ -686,12 +682,7 @@ func (rf *Raft) election(cancelToken *int32) {
 			if !reply.VoteGranted && reply.Term > votedForTerm { // if there is a higher term, stop election
 				rf.mu.Lock()
 
-				// only stop once
 				if !isCancel {
-					rf.currentTerm = reply.Term
-					rf.state = RS_Follower
-					rf.votedFor = nil
-					rf.persist()
 					atomic.StoreInt32(cancelToken, 1) // cancel
 					log.Printf("[%v] stop election because [%v] has higher term, turn to follower\n", rf.me, server)
 					isCancel = true
@@ -826,8 +817,10 @@ func (rf *Raft) syncEntries(cancelToken *int32) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 
-				rf.nextIndex[server] = newNextIndex // apply success, update next index
-				rf.matchIndex[server] = newNextIndex - 1
+				rf.nextIndex[server] = newNextIndex          // apply success, update next index
+				if rf.matchIndex[server] <= newNextIndex-1 { //increases monotonically
+					rf.matchIndex[server] = newNextIndex - 1
+				}
 			} else {
 				rf.handleFailedReply(server, &args, &reply, cancelToken)
 			}
