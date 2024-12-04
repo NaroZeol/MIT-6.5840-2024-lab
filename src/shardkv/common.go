@@ -1,5 +1,7 @@
 package shardkv
 
+import "6.5840/shardctrler"
+
 //
 // Sharded key/value server.
 // Lots of replica groups, each running Raft.
@@ -10,18 +12,24 @@ package shardkv
 //
 
 const (
-	OK                 = "OK"
-	ERR_NoKey          = "Not such key"
-	ERR_WrongGroup     = "Wrong group"
-	ERR_WrongLeader    = "Not leader"
-	ERR_CommitTimeout  = "Commit timeout"
-	ERR_FailedToCommit = "Failed to commit"
+	OK                  = "OK"
+	ERR_NoKey           = "Not such key"
+	ERR_WrongGroup      = "Wrong group"
+	ERR_WrongLeader     = "Not leader"
+	ERR_CommitTimeout   = "Commit timeout"
+	ERR_FailedToCommit  = "Failed to commit"
+	ERR_HigherConfigNum = "Higer config number"
 )
 
 const (
 	OT_GET    = "Get"
 	OT_PUT    = "Put"
 	OT_APPEND = "Append"
+)
+
+// special ck ID
+const (
+	Local_ID = -1
 )
 
 type Err string
@@ -50,6 +58,31 @@ type GetArgs struct {
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+type ChangeConfigArgs struct {
+	Gid    int
+	Me     int
+	Id     int64
+	ReqNum int64
+
+	OldNum int
+	NewNum int
+	Config shardctrler.Config
+}
+
+type ChangeConfigReply struct {
+	Num int
+	Err Err
+}
+
+type RequestMapArgs struct {
+	Config shardctrler.Config
+}
+
+type RequestMapReply struct {
+	Err Err
+	Mp  map[string]string
 }
 
 type GenericArgs interface {
@@ -86,10 +119,28 @@ func (args PutAppendArgs) getKey() string {
 	return args.Key
 }
 
+// indentif this RPC is a local "RPC"
+func (args ChangeConfigArgs) getId() int64 {
+	return Local_ID
+}
+
+func (args ChangeConfigArgs) getReqNum() int64 {
+	return args.ReqNum
+}
+
+// only define for satisfying interface
+func (args ChangeConfigArgs) getKey() string {
+	return ""
+}
+
 func (reply *GetReply) setErr(err Err) {
 	reply.Err = err
 }
 
 func (reply *PutAppendReply) setErr(err Err) {
+	reply.Err = err
+}
+
+func (reply *ChangeConfigReply) setErr(err Err) {
 	reply.Err = err
 }
