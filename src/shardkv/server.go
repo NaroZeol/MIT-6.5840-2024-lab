@@ -116,7 +116,7 @@ func (kv *ShardKV) ChangeConfig(args *ChangeConfigArgs, reply *ChangeConfigReply
 }
 
 func (kv *ShardKV) RequestMapAndSession(args *RequestMapAndSessionArgs, reply *RequestMapAndSessionReply) {
-	DPrintf("[SKV-S][%v][%v] receive RPC RequestMap from [%v][%v]", kv.gid, kv.me, args.Gid, args.Me)
+	DPrintf("[SKV-S][%v][%v] receive RPC RequestMapAndSession from [%v][%v]", kv.gid, kv.me, args.Gid, args.Me)
 	replyMp := make(map[string]string)
 	replySession := make(map[string]Session, 0)
 
@@ -147,6 +147,19 @@ func (kv *ShardKV) RequestMapAndSession(args *RequestMapAndSessionArgs, reply *R
 	reply.Err = OK
 	reply.Mp = replyMp
 	reply.Sessions = replySession
+}
+
+func (kv *ShardKV) GetConfigNum(args *GetConfigNumArgs, reply *GetConfigNumReply) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		reply.Err = ERR_WrongLeader
+		return
+	}
+
+	reply.ConfigNum = kv.config.Num
+	reply.Err = OK
 }
 
 func (kv *ShardKV) handleNormalRPC(args GenericArgs, reply GenericReply, opType string) {
@@ -328,20 +341,33 @@ func (kv *ShardKV) MoveShards(oldConfig shardctrler.Config, newConfig shardctrle
 		return
 	}
 
+	// which shard should send to. (gid -> {set of sending shards})
+	sendTo := make(map[int]map[int]bool, 0)
 	// which shard should receive from. (gid -> {set of needed shards})
 	receiveFrom := make(map[int]map[int]bool, 0)
 
 	for i := 0; i < shardctrler.NShards; i++ {
 		if oldConfig.Shards[i] != kv.gid && newConfig.Shards[i] == kv.gid {
+			srcGid := oldConfig.Shards[i]
 			// receiveFrom: gid -> set of needed shards
-			if receiveFrom[oldConfig.Shards[i]] == nil {
-				receiveFrom[oldConfig.Shards[i]] = make(map[int]bool)
+			if receiveFrom[srcGid] == nil {
+				receiveFrom[srcGid] = make(map[int]bool)
 			}
-			receiveFrom[oldConfig.Shards[i]][i] = true
+			receiveFrom[srcGid][i] = true
+		}
+
+		if oldConfig.Shards[i] == kv.gid && newConfig.Shards[i] != kv.gid {
+			destGid := newConfig.Shards[i]
+			// sendTo: gid -> set of senng shards
+			if sendTo[destGid] == nil {
+				sendTo[destGid] = make(map[int]bool)
+			}
+			sendTo[destGid][i] = true
 		}
 	}
 	DPrintf("[SKV-S][%v][%v] oldConfig: %+v", kv.gid, kv.me, oldConfig)
 	DPrintf("[SKV-S][%v][%v] newConfig: %+v", kv.gid, kv.me, newConfig)
+	DPrintf("[SKV-S][%v][%v] sendTo		: %+v", kv.gid, kv.me, sendTo)
 	DPrintf("[SKV-S][%v][%v] receiveFrom: %+v", kv.gid, kv.me, receiveFrom)
 
 	// receive From
@@ -353,7 +379,7 @@ func (kv *ShardKV) MoveShards(oldConfig shardctrler.Config, newConfig shardctrle
 		go func(gid int, shards map[int]bool) {
 			defer wg.Done()
 
-			for {
+			for !kv.killed() {
 				if servers, ok := oldConfig.Groups[gid]; ok {
 					for si := 0; si < len(servers); si++ {
 						srv := kv.make_end(servers[si])
@@ -397,6 +423,42 @@ func (kv *ShardKV) MoveShards(oldConfig shardctrler.Config, newConfig shardctrle
 	}
 	kv.mu.Unlock()
 	wg.Wait()
+
+	// do not need waitting for this
+	for gid, shards := range sendTo {
+		go func(gid int, shards map[int]bool) {
+			for !kv.killed() {
+				if servers, ok := oldConfig.Groups[gid]; ok {
+					for si := 0; si < len(servers); si++ {
+						srv := kv.make_end(servers[si])
+						args := GetConfigNumArgs{}
+						reply := GetConfigNumReply{}
+						ok := srv.Call("ShardKV.GetConfigNum", &args, &reply)
+
+						if ok && reply.Err == OK && reply.ConfigNum >= newConfig.Num {
+							kv.mu.Lock()
+							defer kv.mu.Unlock()
+
+							for key, value := range kv.mp {
+								if shards[key2shard(key)] {
+									DPrintf("[SKV-S][%v][%v] Delete Key: %v, Value: %v, Shard %v becasue Group %v update ConfigNum to %v", kv.gid, kv.me, key, value, key2shard(key), gid, reply.ConfigNum)
+									delete(kv.mp, key)
+								}
+							}
+							return
+						}
+						// ... not ok, or ErrWrongLeader
+						if ok && (reply.Err != OK) {
+							DPrintf("[SKV-S][%v][%v] Server [%v][%v] reply with error: %v", kv.gid, kv.me, gid, si, reply.Err)
+						} else if !ok {
+							DPrintf("[SKV-S][%v][%v] GetConfigNum to [%v][%v] timeout", kv.gid, kv.me, gid, si)
+						}
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
+			}
+		}(gid, shards)
+	}
 
 	kv.mu.Lock()
 }

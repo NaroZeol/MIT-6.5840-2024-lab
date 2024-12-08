@@ -90,6 +90,14 @@ type RequestMapAndSessionReply struct {
 	Sessions map[string]Session
 }
 
+type GetConfigNumArgs struct {
+}
+
+type GetConfigNumReply struct {
+	Err       Err
+	ConfigNum int
+}
+
 type GenericArgs interface {
 	getId() int64
 	getReqNum() int64
